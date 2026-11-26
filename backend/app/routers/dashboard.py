@@ -1,6 +1,6 @@
 from __future__ import annotations
 from fastapi import APIRouter
-from app.db import db, rows_to_list, row_to_dict
+from app.db import db, rows_to_list
 from app.services.common import RELEASE_SELECT
 
 router = APIRouter(tags=["总览"])
@@ -44,4 +44,30 @@ def overview():
                 """
             ).fetchall()
         )
-        return {"分布": counts, "在途": active, "环境版本": versions, "实例": health}
+        in_flight_locks = rows_to_list(
+            conn.execute(
+                """
+                SELECT l.release_id AS 编号, r.serial AS 发版单号, r.status AS 状态,
+                       l.stage AS 阶段, l.held_at AS 持锁时间, l.expires_at AS 过期时间
+                FROM release_locks l JOIN releases r ON r.id = l.release_id
+                ORDER BY l.held_at
+                """
+            ).fetchall()
+        )
+        contentions = rows_to_list(
+            conn.execute(
+                """
+                SELECT id AS 编号, ref_id AS 关联编号, action AS 动作,
+                       created_at AS 时间, note AS 争用戳
+                FROM audit_events WHERE kind='争用' ORDER BY id DESC LIMIT 20
+                """
+            ).fetchall()
+        )
+        return {
+            "分布": counts,
+            "在途": active,
+            "环境版本": versions,
+            "实例": health,
+            "在途登记": in_flight_locks,
+            "争用记录": contentions,
+        }

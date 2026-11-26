@@ -208,6 +208,27 @@ button.danger {
 .muted { color: var(--muted); font-size: 0.9rem; }
 .err { color: var(--danger); white-space: pre-wrap; }
 
+/* 争用收口可视化：争用戳与对撞行全站同一套标识 */
+.contention {
+  border: 1px solid var(--danger);
+  border-left: 4px solid var(--danger);
+  background: #fbeae7;
+  color: #7d241a;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.88rem;
+}
+.row-contention td { background: #fdf1ef; }
+.stamp-cell {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--gate-deep);
+  white-space: nowrap;
+}
+.row-ok td { background: #eef7f2; }
+.row-bad td { background: #fbeae7; }
+.stat.check-ok { border-bottom-color: var(--ok); }
+.stat.check-bad { border-bottom-color: var(--danger); }
+
 .table-wrap { overflow: auto; }
 table {
   width: 100%;

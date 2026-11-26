@@ -6,6 +6,7 @@ export default function Rollback() {
   const [rid, setRid] = useState('')
   const [ver, setVer] = useState('1.0.0')
   const [err, setErr] = useState('')
+  const [stamp, setStamp] = useState(null)
   const load = async () => {
     const all = await api('/发版单')
     const active = all.filter((r) => ['已放行', '晋升中'].includes(r.状态))
@@ -14,16 +15,24 @@ export default function Rollback() {
   }
   useEffect(() => { load().catch((e) => setErr(e.message)) }, [])
   const go = async () => {
-    setErr('')
+    setErr(''); setStamp(null)
     try {
       await api(`/发版单/${rid}/回滚`, { method: 'POST', body: JSON.stringify({ 目标版本: ver }) })
       load()
-    } catch (e) { setErr(e.message) }
+    } catch (e) {
+      setStamp(e.contention || null)
+      setErr(e.message)
+    }
   }
   return (
     <div className="panel">
       <h2>回滚</h2>
       {err && <p className="err">{err}</p>}
+      {stamp && (
+        <p className="contention">
+          争用戳 {stamp.争用戳} · 口径：{stamp.口径} · 结局：{stamp.结局}
+        </p>
+      )}
       <div className="row">
         <label>发版单
           <select value={rid} onChange={(e) => setRid(e.target.value)}>

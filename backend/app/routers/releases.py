@@ -1,7 +1,7 @@
 from __future__ import annotations
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
-from app.db import db, rows_to_list, row_to_dict
+from app.db import db, rows_to_list, row_to_dict, write_tx
 from app.services.common import (
     RELEASE_SELECT,
     assert_app_enabled,
@@ -10,7 +10,10 @@ from app.services.common import (
     get_setting,
     next_serial,
     now_str,
+    set_app_env_version,
+    upsert_instance,
 )
+from app.services.contention import guarded_write, make_fingerprint
 
 router = APIRouter(tags=["发版单"])
 
@@ -41,7 +44,8 @@ def one_release(release_id: int):
 
 @router.post("/发版单")
 def create_release(body: ReleaseIn):
-    with db() as conn:
+    # 发版单号生成与插入须在同一即时写事务内，避免并发申请重号
+    with write_tx() as conn:
         assert_app_enabled(conn, body.应用编号)
         ratio = body.金丝雀比例
         if ratio is None:
@@ -64,46 +68,62 @@ def create_release(body: ReleaseIn):
         return row_to_dict(get_release(conn, rid))
 
 
+def _admit_work(conn, release_id: int) -> dict:
+    r = conn.execute("SELECT * FROM releases WHERE id=?", (release_id,)).fetchone()
+    if not r:
+        raise HTTPException(404, "发版单不存在")
+    if r["status"] != "待入闸":
+        raise HTTPException(400, "仅待入闸可入闸")
+    assert_app_enabled(conn, r["app_id"])
+    must_green = get_setting(conn, "入闸须流水线绿", "是") == "是"
+    if must_green and r["pipeline_status"] != "绿":
+        raise HTTPException(400, "流水线未绿，禁止入闸")
+    if not r["artifact_digest"]:
+        raise HTTPException(400, "缺少制品摘要，禁止入闸")
+    active = conn.execute(
+        """
+        SELECT id FROM releases
+        WHERE app_id=? AND id!=? AND status IN ('已入闸','晋升中','已放行','回滚中')
+        """,
+        (r["app_id"], release_id),
+    ).fetchone()
+    if active:
+        raise HTTPException(400, "同应用已有在途发版单，禁止并行入闸")
+    test = conn.execute("SELECT id FROM environments WHERE code='测'").fetchone()
+    now = now_str()
+    cur = conn.execute(
+        """
+        UPDATE releases SET status='已入闸', admitted_at=?, current_env_id=?
+        WHERE id=? AND status='待入闸'
+        """,
+        (now, test["id"], release_id),
+    )
+    if cur.rowcount != 1:
+        # 条件更新落空：状态在事务内被改，整笔回滚到争用前
+        raise HTTPException(409, "入闸争用收口：发版单已离开待入闸，整笔失败")
+    # 入闸回执与当前环境（测）落点同事务补齐：名册版本 + 实例，可核可对账
+    set_app_env_version(conn, r["app_id"], test["id"], r["target_version"])
+    upsert_instance(conn, r["app_id"], test["id"], r["target_version"], "探针绿", release_id)
+    audit(conn, "发版单", release_id, "入闸", r["serial"])
+    return row_to_dict(get_release(conn, release_id))
+
+
 @router.post("/发版单/{release_id}/入闸")
-def admit(release_id: int):
-    with db() as conn:
-        r = conn.execute("SELECT * FROM releases WHERE id=?", (release_id,)).fetchone()
-        if not r:
-            raise HTTPException(404, "发版单不存在")
-        if r["status"] != "待入闸":
-            raise HTTPException(400, "仅待入闸可入闸")
-        assert_app_enabled(conn, r["app_id"])
-        must_green = get_setting(conn, "入闸须流水线绿", "是") == "是"
-        if must_green and r["pipeline_status"] != "绿":
-            raise HTTPException(400, "流水线未绿，禁止入闸")
-        if not r["artifact_digest"]:
-            raise HTTPException(400, "缺少制品摘要，禁止入闸")
-        active = conn.execute(
-            """
-            SELECT id FROM releases
-            WHERE app_id=? AND id!=? AND status IN ('已入闸','晋升中','已放行','回滚中')
-            """,
-            (r["app_id"], release_id),
-        ).fetchone()
-        if active:
-            raise HTTPException(400, "同应用已有在途发版单，禁止并行入闸")
-        test = conn.execute("SELECT id FROM environments WHERE code='测'").fetchone()
-        now = now_str()
-        conn.execute(
-            """
-            UPDATE releases SET status='已入闸', admitted_at=?, current_env_id=? WHERE id=?
-            """,
-            (now, test["id"], release_id),
-        )
-        audit(conn, "发版单", release_id, "入闸", r["serial"])
-        return row_to_dict(get_release(conn, release_id))
+def admit(release_id: int, idempotency_key: str | None = Header(default=None)):
+    return guarded_write(
+        release_id,
+        stage="入闸",
+        token=idempotency_key,
+        fingerprint=make_fingerprint(release_id, "入闸", {}),
+        work=lambda conn: _admit_work(conn, release_id),
+    )
 
 
 @router.post("/发版单/{release_id}/流水线")
 def set_pipeline(release_id: int, body: PipelineIn):
     if body.流水线 not in ("未回执", "绿", "红"):
         raise HTTPException(400, "流水线状态非法")
-    with db() as conn:
+    with write_tx() as conn:
         r = conn.execute("SELECT * FROM releases WHERE id=?", (release_id,)).fetchone()
         if not r:
             raise HTTPException(404, "发版单不存在")

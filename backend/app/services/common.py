@@ -54,7 +54,13 @@ SELECT r.id AS 编号,
        r.created_at AS 申请时间,
        r.admitted_at AS 入闸时间,
        r.released_at AS 放行时间,
-       r.rolled_back_at AS 回滚时间
+       r.rolled_back_at AS 回滚时间,
+       (SELECT COUNT(*) FROM promote_events p WHERE p.release_id = r.id) AS 晋升事件数,
+       (SELECT COALESCE(MAX(p.seq), 0) FROM promote_events p WHERE p.release_id = r.id) AS 最大事件序号,
+       (SELECT l.stage FROM release_locks l WHERE l.release_id = r.id) AS 在途锁阶段,
+       (SELECT au.note FROM audit_events au
+         WHERE au.ref_id = r.id AND au.kind = '争用' AND au.action LIKE '%争用拒绝'
+         ORDER BY au.id DESC LIMIT 1) AS 最近争用戳
 FROM releases r
 JOIN apps a ON a.id = r.app_id
 LEFT JOIN environments e ON e.id = r.current_env_id
